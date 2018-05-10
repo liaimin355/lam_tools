@@ -1,0 +1,484 @@
+#!/bin/sh
+# Script Name : pmsql
+# Author      : xxxx
+# Description : pmsql for quik responce for mysql
+############################################################################################
+# Version History
+# ===============
+#
+# Who         version     Date      Description
+# ====        =======     ======    ======================
+# xxxxxxxx    1.01       2018-5-11  First Issue.
+###########################################################################################
+
+
+
+
+#MYSQL_HOME="/paic/mysql/base5.6"
+#LOGIN_PATH=root
+#CONFIG_FILE=/paic/mydata/3306/my.cnf
+#PT_BASE=/usr/bin
+#export MYSQL_HOME CONFIG_FILE LOGIN_PATH PT_PROFILE PT_BASE
+
+
+source $HOME/.bash_profile
+MYSQL=$MYSQL_HOME/bin/mysql
+PORT=`cat $CONFIG_FILE | grep -i 'port' | head -n 1 | awk -F "=" '{print $2}'`
+SOCKET=`cat $CONFIG_FILE | grep -i 'socket' | head -n 1 | awk -F "=" '{print $2}'`
+#PTUSER=`cat $PT_PROFILE | grep -i 'PTUSER' | head -n 1 | awk -F "=" '{print $2}'`
+#PTPASSWORD=`cat $PT_PROFILE | grep -i 'PTPASSWORD' | head -n 1 | awk -F "=" '{print $2}'`
+#PTPORT=`cat $PT_PROFILE | grep -i 'PTPORT' | head -n 1 | awk -F "=" '{print $2}'`
+
+
+
+
+PT_KILL_CMD="perl $PT_BASE/pt-kill "
+PT_QUERY_CMD="perl $PT_BASE/pt-query-digest  "
+MYSQL_CMD_V=" $MYSQL --login-path=$LOGIN_PATH -S $SOCKET -vvv"
+MYSQL_CMD=" $MYSQL --login-path=$LOGIN_PATH -S $SOCKET"
+
+
+export LANG=en_US.UTF-8
+############################################################################################
+print_copyright()
+{
+ echo
+ echo "==========================================================================="
+ echo " tbsql   :  pmsql for quik responce for mysql"
+ echo " Author  :  XXXXXXXXXXXXXX"
+ echo " Version : 1.01"
+ echo "==========================================================================="
+ echo
+ echo " Try 'pmsql help' for more information."
+ echo
+}
+print_usage()
+{
+ echo
+ echo " Usage: pmsql cmd [arg1] [arg2] [arg3] [...]"
+ echo "---------------------------------------------------------------------------"
+ echo "  cmd       argments                description"
+ echo "  ========  ======================  ==========================================="
+ echo "  cnf                              : Display config file:my.cnf"
+ echo "  alert                            : Show error log file "
+ echo "  orz                              : display orz log file"
+ echo "  dbs                              : Show databases"
+ echo "  locku     username               : lock user "
+ echo "  unlocku   username               : unlock user"
+ echo "  slow_his  minutes                : slow log begin  $minutes minutes ago and now"
+ echo "  slow                             : last 1000 slow log"
+ echo "  param     parameter_name         : Show  variables"
+ echo "  act                              : show active session"
+ echo "  status    status_name            : show global status"
+ echo "  instats                          : show engine innodb status  "
+ echo "  lock                             : List lock information"
+ echo "  lockdetail                       : List lock detail "
+ echo "  trx                              : List transaction information"
+ echo "  ot                               : List outline information "
+ echo "  plan      db_name, sqlfile       : display the plan informaiton"
+ echo "  tablike   part_table_name        : display the owner of table"
+ echo "  size      table_name             : display the size of data and index"
+ echo "  desc      table_schema,table_name: Show create table "
+ echo "  index     table_schema,table_name: Show index from "
+ echo "  user                             : List User "
+ echo "  grants    username               : show grants for "
+ echo "  master                           : show master status "
+ echo "  slave                            : show slave  status "
+ echo "  ku        username               : kill connection for username"
+ echo "  kd        dbname                 : kill connection for db"
+ echo "  ki        info                   : kill connection for info like "
+ echo "  ks        state                  : kill connection for state"
+ echo "  kh        host                   : kill connection for host"
+ echo "  kall                             : kill all connect but system and replication"
+echo "=========================================================================="
+ echo
+}
+##############################################################################################
+
+
+
+
+##############################################################################################
+CMD=`echo $1 | tr "[A-Z]" "[a-z]"`
+case $CMD in
+cnf)
+  less $CONFIG_FILE
+;;
+alert)
+  tail -200f `cat $CONFIG_FILE |grep -i 'log_error' | head -n 1 |awk -F "=" '{print $2}'`
+;;
+orz)
+  nday=`date "+%Y-%m-%d"`
+  tail -200f $HOME/admin/log/orzdba.log.${nday}
+;;
+dbs)
+  $MYSQL_CMD_V <<EOF
+  "show databases"
+EOF
+;;
+locku)
+ username=$2
+ $MYSQL_CMD_V <<EOF
+ update mysql.user set host='localhost' where user='$username';
+ commit;
+ flush privileges;
+EOF
+;;
+unlocku)
+ username=$2
+ $MYSQL_CMD_V <<EOF
+ update mysql.user set host='%' where user='$username';
+ commit;
+ flush privileges;
+EOF
+;;
+
+
+
+
+slow_his)
+  slow_log=`mysql --login-path=root -N -r -B -e "select VARIABLE_VALUE from  information_schema.global_variables where VARIABLE_NAME = 'SLOW_QUERY_LOG_FILE'"`
+  minutes=$2
+  begin_time=`date "+%Y-%m-%d %H:%M:%S"  -d "$minutes minutes ago"`
+  $PT_QUERY_CMD --since="$begin_time"  ${slow_log} >/tmp/last_time.pqd && less /tmp/last_time.pqd
+;;
+
+
+slow)
+  slow_log=`mysql --login-path=root -N -r -B -e "select VARIABLE_VALUE from  information_schema.global_variables where VARIABLE_NAME = 'SLOW_QUERY_LOG_FILE'"`
+  tail -1000 ${slow_log} | $PT_QUERY_CMD
+;;
+
+
+param)
+param_name=$2
+$MYSQL_CMD_V <<EOF
+show global  variables like '%${param_name}%'
+EOF
+;;
+
+
+act)
+$MYSQL_CMD_V <<EOF
+ select id,db,user,state,time,TIME_MS,ROWS_SENT,ROWS_EXAMINED from information_schema.processlist where info is not null order by time;
+EOF
+ ;;
+
+
+status)
+status_name=$2
+$MYSQL_CMD_V <<EOF
+show global  status like '%${status_name}%'
+EOF
+;;
+
+
+instats)
+$MYSQL_CMD -e "
+show engine innodb status \G" > /tmp/innodb_stats.log && less /tmp/innodb_stats.log
+;;
+
+
+lock)
+$MYSQL_CMD_V <<EOF
+select 'Blocker' role, p.id, p.user,
+  left(p.host, locate(':', p.host) - 1) host, tx.trx_id, tx.trx_state, tx.trx_started, timestampdiff(second, tx.trx_started, now()) duration, lo.lock_mode, lo.lock_type, lo.lock_table, lo.lock_index, tx.trx_query, tx.trx_tables_in_use, tx.trx_tables_locked, tx.trx_rows_locked
+  from information_schema.innodb_trx        tx,
+       information_schema.innodb_lock_waits lw,
+       information_schema.innodb_locks      lo,
+       information_schema.processlist       p
+ where lw.blocking_trx_id = tx.trx_id
+   and p.id = tx.trx_mysql_thread_id
+   and lo.lock_trx_id = tx.trx_id
+union all
+select 'Blockee' role, p.id, p.user,
+  left(p.host, locate(':', p.host) - 1) host, tx.trx_id, tx.trx_state, tx.trx_started, timestampdiff(second, tx.trx_started, now()) duration, lo.lock_mode, lo.lock_type, lo.lock_table, lo.lock_index, tx.trx_query, tx.trx_tables_in_use, tx.trx_tables_locked, tx.trx_rows_locked
+  from information_schema.innodb_trx        tx,
+       information_schema.innodb_lock_waits lw,
+       information_schema.innodb_locks      lo,
+       information_schema.processlist       p
+ where lw.requesting_trx_id = tx.trx_id
+   and p.id = tx.trx_mysql_thread_id
+   and lo.lock_trx_id = tx.trx_id;
+EOF
+;;
+
+
+lockdetail)
+$MYSQL_CMD_V <<EOF
+SELECT concat(IFNULL(CONCAT('waiting_trx_id is :{', r.trx_id, '} '), ' '),
+              IFNULL(CONCAT('waiting_thread is :{',
+                            r.trx_mysql_thread_id,
+                            '} '),
+                     ' '),
+              IFNULL(CONCAT('wait_time is :{',
+                            TIMESTAMPDIFF(SECOND,
+                                          r.trx_wait_started,
+                                          CURRENT_TIMESTAMP),
+                            '} '),
+                     ' '),
+              IFNULL(CONCAT('waiting_query is :{', r.trx_query, '} '), ' '),
+              IFNULL(CONCAT('waiting_trx_started is :{', r.trx_started, '} '),
+                     ' '),
+              IFNULL(CONCAT('waiting_trx_wait_started is :{',
+                            r.trx_wait_started,
+                            '} '),
+                     ' '),
+              IFNULL(CONCAT('waiting_table_lock is :{', l.lock_table, '} '),
+                     ' '),
+              IFNULL(CONCAT('blocking_trx_id is :{', b.trx_id, '} '), ''),
+              IFNULL(CONCAT('blocking_thread is :{',
+                            b.trx_mysql_thread_id,
+                            '} '),
+                     ' '),
+              IFNULL(CONCAT('blocking_trx_started is :{',
+                            b.trx_started,
+                            '} '),
+                     ' '),
+              IFNULL(CONCAT('blocking_host is :{',
+                            SUBSTRING(p.host, 1, INSTR(p.host, ':') - 1),
+                            '} '),
+                     ' '),
+              IFNULL(CONCAT('blocking_port is :{',
+                            SUBSTRING(p.host, INSTR(p.host, ':') + 1),
+                            '} '),
+                     ' '),
+              IFNULL(CONCAT('idle_in_trx is :{',
+                            IF(p.command = 'Sleep', p.time, 0),
+                            '} '),
+                     ' '),
+              IFNULL(CONCAT('blocking_query is :{', b.trx_query, '} '), ' ')) innodblocksmsg
+  FROM information_schema.INNODB_LOCK_WAITS as w
+ INNER JOIN information_schema.INNODB_TRX as b on b.trx_id =
+                                                  w.blocking_trx_id
+ INNER JOIN information_schema.INNODB_TRX as r on r.trx_id =
+                                                  w.requesting_trx_id
+ INNER JOIN information_schema.INNODB_LOCKS as l on w.requested_lock_id =
+                                                    l.lock_id
+  LEFT JOIN information_schema.PROCESSLIST as p on p.id =
+                                                   b.trx_mysql_thread_id
+ ORDER BY CONCAT('wait_time is ',
+                 TIMESTAMPDIFF(SECOND, r.trx_wait_started, CURRENT_TIMESTAMP)) DESC;
+EOF
+;;
+
+
+trx)
+echo "Transaction information!"
+$MYSQL_CMD_V <<EOF
+select trx_query,trx_started,trx_wait_started,trx_state,trx_mysql_thread_id from information_schema.innodb_trx;
+EOF
+;;
+
+
+ot)
+  $MYSQL_CMD_V <<EOF
+ system echo ""
+ system echo ""
+ system echo ""
+ system echo "********************LONG QUERY*************************"
+select * from information_schema.processlist where time > 60 and (user like 'app%' or user like '%opr')  and info is not null order by time desc limit 10;
+
+
+
+
+  system echo ""
+  system echo ""
+  system echo ""
+  system echo "********************TOP ACTIVE USER*************************"
+select user,db,substring_index(host,':',1) iplist,count(*) CNT from  information_schema.processlist 
+ where info is not null and (user like 'app%' or user like '%opr')  
+group by user,db,substring_index(host,':',1) order by cnt desc limit 20;
+
+
+  system echo ""
+  system echo ""
+  system echo ""
+  system echo "********************TOP EVENT*************************" 
+  select db,TIME_MS,ROWS_SENT,ROWS_EXAMINED,info,state from information_schema.processlist where info is not null and (user like 'app%' or user like '%opr') order by time desc;
+
+
+EOF
+;;
+plan)
+  schema_name=$2
+  plan_file=$3
+  $MYSQL_CMD_V <<EOF
+  use $schema_name
+  source $plan_file
+EOF
+;;
+
+
+tblike)
+ table_name=$2
+   $MYSQL_CMD_V <<EOF
+ select TABLE_SCHEMA,TABLE_NAME from information_schema.tables where table_name like '%${table_name}%';
+EOF
+
+
+;;
+
+
+
+
+size)
+ table_name=$2
+ $MYSQL_CMD_V <<EOF
+SELECT table_schema,table_name,round(((DATA_LENGTH+INDEX_LENGTH)/1024/1024)) as "SIZE_MB",round(((DATA_LENGTH)/1024/1024)) as "DATA_MB",round(((INDEX_LENGTH)/1024/1024)) as "INDEX_MB" FROM  INFORMATION_SCHEMA.TABLES  WHERE  TABLE_NAME='$table_name';
+EOF
+;;
+
+
+desc)
+ table_schema=$2
+ table_name=$3
+$MYSQL_CMD_V <<EOF
+show create table $table_schema.$table_name
+desc $table_schema.$table_name
+EOF
+;;
+
+
+index)
+ table_schema=$2
+ table_name=$3
+$MYSQL_CMD_V <<EOF
+  show index from $table_schema.$table_name
+EOF
+;;
+
+
+user)
+ $MYSQL_CMD_V <<EOF
+  select user,host from mysql.user order by 1;
+EOF
+;;
+
+
+grants)
+  user=$2
+ $MYSQL_CMD_V <<EOF
+  show grants for ${user}
+EOF
+;;
+
+
+master)
+  $MYSQL_CMD_V <<EOF
+  show master status
+EOF
+;;
+
+
+slave)
+  $MYSQL_CMD_V <<EOF
+  show slave status \G
+EOF
+;;
+
+
+ku)
+ dt=`date "+%Y%m%d%H%M%S"`
+ user=$2
+ KILL_FILE="/tmp/kill_file_$dt.log";
+  if [ -f $KILL_FILE ];
+  then 
+   rm $KILL_FILE
+  fi
+  $MYSQL_CMD_V <<EOF
+  select concat('kill ',ID,';') from  information_schema.processlist where user='${user}' and info is not null into outfile '${KILL_FILE}';  
+  tee /tmp/kill_log.log
+  source ${KILL_FILE}
+  notee
+EOF
+;;
+
+
+kd)
+  db_name=$2
+  dt=`date "+%Y%m%d%H%M%S"`
+  KILL_FILE="/tmp/kill_file_$dt.log";
+  if [ -f $KILL_FILE ];
+  then 
+   rm $KILL_FILE
+  fi
+  $MYSQL_CMD_V <<EOF
+ select concat('kill ',ID,';') from  information_schema.processlist where  db='${db_name}' and info is not null into outfile '${KILL_FILE}';  
+  tee /tmp/kill_log
+  source ${KILL_FILE}
+  notee
+EOF
+;;
+ki)
+  infol=$2
+  dt=`date "+%Y%m%d%H%M%S"`
+  KILL_FILE="/tmp/kill_file_$dt.log";
+  if [ -f $KILL_FILE ];
+  then 
+   rm $KILL_FILE
+  fi
+  $MYSQL_CMD_V <<EOF
+ select concat('kill ',ID,';') from  information_schema.processlist where  info like '%${infol}%' and info not like '%like%' into outfile '${KILL_FILE}';  
+  tee /tmp/kill_log
+  source ${KILL_FILE}
+  notee
+EOF
+;;
+ks)
+  state=$2
+  dt=`date "+%Y%m%d%H%M%S"`
+  KILL_FILE="/tmp/kill_file_$dt.log";
+  if [ -f $KILL_FILE ];
+  then 
+   rm $KILL_FILE
+  fi
+  $MYSQL_CMD_V <<EOF
+ select concat('kill ',ID,';') from  information_schema.processlist where  state='${state}' and info is not null into outfile '${KILL_FILE}';  
+  tee /tmp/kill_log
+  source ${KILL_FILE}
+  notee
+EOF
+;;
+kh)
+  host=$2
+  dt=`date "+%Y%m%d%H%M%S"`
+  KILL_FILE="/tmp/kill_file_$dt.log";
+  if [ -f $KILL_FILE ];
+  then 
+   rm $KILL_FILE
+  fi
+  $MYSQL_CMD_V <<EOF
+ select concat('kill ',ID,';') from  information_schema.processlist where  host='${host}' and info is not null into outfile '${KILL_FILE}';  
+  tee /tmp/kill_log
+  source ${KILL_FILE}
+  notee
+EOF
+;;
+
+
+kall)
+  dt=`date "+%Y%m%d%H%M%S"`
+  KILL_FILE="/tmp/kill_file_$dt.log";
+  if [ -f $KILL_FILE ];
+  then 
+   rm $KILL_FILE
+  fi
+  $MYSQL_CMD_V <<EOF
+ select concat('kill ',ID,';') from  information_schema.processlist where user not in ('system user','root','dbsync','dbsync_bak') and (state not like '%master%' or state not like '%slave%' or state not like '%binlog%')  and info not like '%like%' into outfile '${KILL_FILE}';  
+  tee /tmp/kill_log
+  source ${KILL_FILE}
+  notee
+EOF
+;;
+
+
+myawr)
+#/home/mysql/agent/bin/myawr
+/usr/local/bin/myawr
+;;
+*)
+ print_copyright
+ print_usage
+;;
+esac
