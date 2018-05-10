@@ -1,0 +1,463 @@
+#!/bin/sh
+
+
+####################################################################################################################
+# Tools to execute SQL scripts from PADB or ACHAIN using a public user.
+# Usage  : sqlexec DB_TYPE DB_NAME SCHEMA_NAME SQL_TYPE SQL_SCRIPTS DML_ROWS [-f]
+# Created: 12/12/2017
+# Author : PAFDBA
+#
+# Version History: 
+#
+#          v1.0  12/12/2017  weilong.meng  Start writing, the first version.
+#          v1.1  12/26/2017  weilong.meng  增加脚本类型和实际脚本匹配判断
+#                            weilong.meng  规范中间文件的命名，保证唯一性
+#                            weilong.meng  输出DML脚本的执行条数
+#          v1.2  12/31/2017  weilong.meng  增加-f参数，执行条数不确定时，强制提交
+#          v2.0  01/05/2018  weilong.meng  增加执行mysql脚本的功能
+#          v2.5  02/01/2018  weilong.meng  通过脚本文件名来解析各个参数，
+#                                          对于MySQL脚本，由于schema名字中带有"_"，需要DB#schema的配置文件来解析
+####################################################################################################################
+
+
+#设置环境变量
+source $HOME/.bash_profile
+
+
+#export ORACLE_BASE=/u01/app/oracle
+#export ORACLE_HOME=$ORACLE_BASE/product/11.2.0/db_1
+#export TNS_ADMIN=$ORACLE_HOME/network/admin
+export NLS_LANG=AMERICAN_AMERICA.AL32UTF8
+export LANG=en_US.UTF-8
+
+
+#声明常量
+CFGFILE='/home/oracle/admin/conf/paf_db.conf'
+MYSQL_CFG='/home/oracle/admin/paf_bin/devops/mysql_db.cnf'
+LOGFILE='/home/oracle/admin/log/sqlexec.log'
+USERNAME='devopsopr'
+PASSWORD='d2wyN3pDbnBscU5TSmx6Wgo='
+TNSNAME='prd_'
+EXEC_ROWS=0
+ROWS_MESSAGE=''
+ERROR_CODE=0
+ERROR_MESSAGE=''
+	
+
+
+#帮助
+function sqlexec_help(){
+    print 0 "
+--============================ help ================================--
+sqlexec: Release 2.5 - Production on `date`
+
+
+Copyright (c) 2017, 2018, PAFDBA and/or its affiliates.  All rights reserved.
+
+
+Execute SQL scripts from PADB or ACHAIN using a public user.
+The utility support <Oracle> and <MySQL> database currently.
+Invoked with the following command:
+
+
+Usage: sqlexec <SQL_SCRIPT> [-f]
+  SQL_SCRIPT : standby sql file name,[ORACLE|MySQL]_DB_SCHEMA_[DDL|DML]_CNT_[BEFORE|AFTER]_[SEQNO]_sqlfile.sql.
+  -f         : Ignore rows comparing. Forced to commit.
+  -h         : Print sqlexec help documentation.
+  
+  Example: sqlexec.sh ORACLE_WLTJF_POINTS_DATA_DML_174_AFTER_NOSEQ_29351_wcwpyH_wltjf_pointsdata_20180120.sql
+           sqlexec.sh MySQL_db_wlt_goods_db_wlt_goods_DML_174_AFTER_NOSEQ_29351_wcwpyH_wltjf_pointsdata_20180120.sql -f
+"
+}
+
+
+#输出日志
+function info(){
+    print 9 "##########################################" >> $LOGFILE
+    print 9 [TIME][`date +%Y-%m-%d" "%H:%M:%S`] >> $LOGFILE
+    print 9 [MESSAGE]" $@ " >> $LOGFILE
+    print 9 "##########################################" >> $LOGFILE
+}
+
+
+#标准化输出
+function print(){
+    level=$1
+    message=$2
+	
+    if [ $level -eq 0 ]; then
+        echo -e "\033[1;32m
+ $message 
+\033[0m"
+    elif [ $level -eq 1 ]; then
+        echo -e "\033[1;33m
+ $message 
+\033[0m"
+    elif [ $level -eq 2 ]; then
+        echo -e "\033[1;31m
+ $message 
+\033[0m"
+    elif [ $level -eq 3 ]; then
+        echo -e "\033[43;31;5m
+ $message 
+\033[0m"
+    else
+        echo
+        echo $message
+    fi
+}
+
+
+#执行Oracle SQL脚本
+function sqlexec_oracle(){
+
+
+    #执行DDL脚本
+    if [ "$SQL_TYPE" = "ddl" ]; then
+        sqlplus  $USERNAME/$PASSWORD@$TNSNAME <<EOF
+whenever oserror exit 110 rollback;
+set echo on feedback on time on timing on heading on termout on trimout on trimspool on verify on define off autocommit off
+set long 9999 linesize 1000 pagesize 1000 numwidth 32
+set serveroutput on size 1000000
+
+
+spool ${SPOOLLOG}
+alter session set current_schema=${SCHEMA_NAME};
+@${SQL_SCRIPTS}
+execute paf_std_pkg.grant_std_privs_v2;
+spool off
+exit
+EOF
+        ERROR_CODE=$?
+        if [ $ERROR_CODE -eq 110 ]; then
+            ERROR_MESSAGE="os error: Please check logfile $LOGFILE"
+        else
+            ERROR_MESSAGE=`cat $LOGFILE | grep -n "ORA-"`
+        fi
+
+
+    #执行DML脚本，比对数据一致性
+    elif [[ "$SQL_TYPE" = "dml"  && "$IGNORE_ROWS" != "-f" ]]; then
+        sqlplus $USERNAME/$PASSWORD@$TNSNAME <<EOF
+whenever sqlerror exit SQL.SQLCODE rollback;
+--whenever oserror exit 110 rollback;
+set echo on feedback on time on timing on heading on termout on trimout on trimspool on verify on define off autocommit off
+set long 9999 linesize 1000 pagesize 1000 numwidth 32
+set serveroutput on size 1000000
+
+
+spool ${SPOOLLOG}
+alter session set current_schema=${SCHEMA_NAME};
+@${SQL_SCRIPTS}
+spool off
+
+
+host cat ${LOGFILE} | grep -E "rows? created.|rows? updated.|rows? deleted." | awk '{sum+=\$1} END {print sum}'  > $EXEC_ROWS_LOG
+host diff $EXEC_ROWS_LOG $DML_ROWS_LOG > $DIFF_ROWS_LOG
+host if [ ! -s $DIFF_ROWS_LOG ]; then echo "commit;" > $TCL_SQL ; else echo "rollback;" > $TCL_SQL ; echo "实际变更条数与开发提供的不一致，已回滚!" > $R
+OWS_ERROR_LOG ; fi
+
+
+spool ${SPOOLLOG} append
+@${TCL_SQL}
+spool off
+exit
+EOF
+        ERROR_CODE=$?
+        if [ $ERROR_CODE -eq 110 ]; then
+            ERROR_MESSAGE="os error: Please check logfile $LOGFILE"
+        else
+            ERROR_MESSAGE=`cat $LOGFILE | grep -n "ORA-"`
+        fi
+        #if [[ -f $EXEC_ROWS_LOG && -n `cat $EXEC_ROWS_LOG` && `cat $TCL_SQL` = "commit;" ]]; then
+        if [[ -f $EXEC_ROWS_LOG && -n `cat $EXEC_ROWS_LOG` ]]; then
+            EXEC_ROWS=`cat $EXEC_ROWS_LOG`
+        fi
+        ROWS_MESSAGE="计划变更条数：$DML_ROWS, 实际变更条数：$EXEC_ROWS. "`cat $ROWS_ERROR_LOG`
+		
+    #执行DML脚本，不比对数据，强制提交
+    elif [[ "$SQL_TYPE" = "dml"  && "$IGNORE_ROWS" = "-f" ]]; then
+        sqlplus $USERNAME/$PASSWORD@$TNSNAME <<EOF
+whenever sqlerror exit SQL.SQLCODE rollback;
+--whenever oserror exit 110 rollback;
+set echo on feedback on time on timing on heading on termout on trimout on trimspool on verify on define off autocommit off
+set long 9999 linesize 1000 pagesize 1000 numwidth 32
+set serveroutput on size 1000000
+
+
+spool ${SPOOLLOG}
+alter session set current_schema=${SCHEMA_NAME};
+@${SQL_SCRIPTS}
+commit;
+spool off
+
+
+host cat ${LOGFILE} | grep -E "rows? created.|rows? updated.|rows? deleted." | awk '{sum+=\$1} END {print sum}'  > $EXEC_ROWS_LOG
+exit
+EOF
+        ERROR_CODE=$?
+        if [ $ERROR_CODE -eq 110 ]; then
+            ERROR_MESSAGE="os error: Please check logfile $LOGFILE"
+        else
+            ERROR_MESSAGE=`cat $LOGFILE | grep -n "ORA-"`
+        fi
+        if [[ -f $EXEC_ROWS_LOG && -n `cat $EXEC_ROWS_LOG` ]]; then
+            EXEC_ROWS=`cat $EXEC_ROWS_LOG`
+        fi
+        ROWS_MESSAGE="计划变更条数：$DML_ROWS, 实际变更条数：$EXEC_ROWS. "`cat $ROWS_ERROR_LOG`
+    fi
+	
+    if [[ -z "$ERROR_MESSAGE" && -z `cat $ROWS_ERROR_LOG` ]]; then
+        print 0 "Execute Successfully!"
+        print 0 "$ROWS_MESSAGE"
+        print 0 "sqlexec logfile: $LOGFILE"
+    else
+        print 2 "$ERROR_MESSAGE"
+        print 2 "$ROWS_MESSAGE"
+        print 2 "sqlexec logfile: $LOGFILE"
+    fi
+
+
+}
+
+
+#执行MySQL SQL脚本
+function sqlexec_mysql(){
+
+
+    #执行DDL脚本
+    if [ "$SQL_TYPE" = "ddl" ]; then
+        mysql --login-path=$DB_NAME -D $SCHEMA_NAME -vv <<EOF
+tee ${SPOOLLOG}
+set autocommit=0;
+source ${SQL_SCRIPTS}
+notee
+exit
+EOF
+    ERROR_MESSAGE=`cat $SPOOLLOG | grep -n "ERROR"`
+    NO_TEE=`grep "Outfile disabled." $LOGFILE | wc -l`
+    if [ $NO_TEE -eq 0 ]; then
+       ERROR_MESSAGE=$ERROR_MESSAGE" ERROR: execution not finished!"
+    fi
+	
+    #执行DML脚本，比对数据一致性
+    elif [[ "$SQL_TYPE" = "dml"  && "$IGNORE_ROWS" != "-f" ]]; then
+        mysql --login-path=$DB_NAME -D $SCHEMA_NAME -vv <<EOF
+tee ${SPOOLLOG}
+set autocommit=0;
+source ${SQL_SCRIPTS}
+notee
+
+
+delimiter $$
+system cat ${SPOOLLOG} | grep -E "rows? affected" | awk '{sum+=\$3} END {print sum}'  > $EXEC_ROWS_LOG
+system diff $EXEC_ROWS_LOG $DML_ROWS_LOG > $DIFF_ROWS_LOG
+system if [ ! -s $DIFF_ROWS_LOG ]; then echo "commit;" > $TCL_SQL; else echo "rollback;" > $TCL_SQL; echo "实际变更条数与开发提供的不一致，已回滚!" > $R
+OWS_ERROR_LOG ; fi
+delimiter ;
+
+
+tee ${SPOOLLOG}
+source ${TCL_SQL}
+notee
+exit
+EOF
+        ERROR_MESSAGE=`cat $SPOOLLOG | grep -n "ERROR"`
+        NO_TEE=`grep "Outfile disabled." $LOGFILE | wc -l`
+        if [ $NO_TEE -eq 0 ]; then
+           ERROR_MESSAGE=$ERROR_MESSAGE" ERROR: execution not finished!"
+        fi
+        #if [[ -f $EXEC_ROWS_LOG && -n `cat $EXEC_ROWS_LOG` && `cat $TCL_SQL` = "commit;" ]]; then
+        if [[ -f $EXEC_ROWS_LOG && -n `cat $EXEC_ROWS_LOG` ]]; then
+            EXEC_ROWS=`cat $EXEC_ROWS_LOG`
+        fi
+        ROWS_MESSAGE="计划变更条数：$DML_ROWS, 实际变更条数：$EXEC_ROWS. "`cat $ROWS_ERROR_LOG`	
+	
+    #执行DML脚本，不比对数据，强制提交
+    elif [[ "$SQL_TYPE" = "dml"  && "$IGNORE_ROWS" = "-f" ]]; then
+        mysql --login-path=$DB_NAME -D $SCHEMA_NAME -vv <<EOF
+tee ${SPOOLLOG}
+set autocommit=0;
+source ${SQL_SCRIPTS}
+commit;
+notee
+
+
+system cat ${SPOOLLOG} | grep -E "rows? affected" | awk '{sum+=\$3} END {print sum}'  > $EXEC_ROWS_LOG
+exit
+EOF
+        ERROR_MESSAGE=`cat $LOGFILE | grep -n "ERROR"`
+        NO_TEE=`grep "Outfile disabled." $LOGFILE | wc -l`
+        if [ $NO_TEE -eq 0 ]; then
+           ERROR_MESSAGE=$ERROR_MESSAGE" ERROR: execution not finished!"
+        fi
+        if [[ -f $EXEC_ROWS_LOG && -n `cat $EXEC_ROWS_LOG` ]]; then
+            EXEC_ROWS=`cat $EXEC_ROWS_LOG`
+        fi
+        ROWS_MESSAGE="计划变更条数：$DML_ROWS, 实际变更条数：$EXEC_ROWS. "`cat $ROWS_ERROR_LOG`
+    fi
+	
+    if [[ -z "$ERROR_MESSAGE" && -z `cat $ROWS_ERROR_LOG` ]]; then
+        print 0 "Execute Successfully!"
+        print 0 "$ROWS_MESSAGE"
+        print 0 "sqlexec logfile: $LOGFILE"
+    else
+        print 2 "$ERROR_MESSAGE"
+        print 2 "$ROWS_MESSAGE"
+        print 2 "sqlexec logfile: $LOGFILE"
+    fi	
+}
+#统计变更数据量
+function dml_count(){
+    #INSERT_ROWS=`cat $LOGFILE | grep "rows? created." | awk '{sum+=$1} END {print sum}'`
+    #UPDATE_ROWS=`cat $LOGFILE | grep "rows? updated." | awk '{sum+=$1} END {print sum}'`
+    #DELETE_ROWS=`cat $LOGFILE | grep "rows? deleted." | awk '{sum+=$1} END {print sum}'`
+	
+    ORACLE_ROWS=`cat ${LOGFILE} | grep -E "rows? created.|rows? updated.|rows? deleted." | awk '{sum+=$1} END {print sum}'`
+	MYSQL_ROWS=`cat ${SPOOLLOG} | grep -E "rows? affected" | awk '{sum+=$3} END {print sum}'`
+}
+
+
+#初始化参数变量
+if [[ $# -lt 1 || $# -gt 2 || "$1" = "-h" || "$1" = "-v" ]]; then
+    sqlexec_help
+    exit 1
+else
+    #接收传入参数
+    SQL_SCRIPTS=$1
+    L_SQL_SCRIPTS=`echo $SQL_SCRIPTS | tr '[A-Z]' '[a-z]'`
+    L_SQL_SCRIPTS=`/bin/basename ${L_SQL_SCRIPTS}`
+    DB_TYPE=`echo $L_SQL_SCRIPTS | awk -F '_' '{print $1}'`
+    
+    #oracle 脚本
+    if [ $DB_TYPE = "oracle" ]; then
+        wltjf=`echo $L_SQL_SCRIPTS | grep points_data | wc -l`
+        DB_NAME=`echo $L_SQL_SCRIPTS | awk -F '_' '{print $2}'`
+        #DB是否存在
+        v_db_exist=`grep -i $DB_NAME $CFGFILE | grep -v "^#" | wc -l`
+        if [ $v_db_exist -eq 0 ]; then
+            print 1 "Warning: Make sure that the db $DB_NAME is configured in /home/oracle/admin/conf/paf_db.conf"
+            sqlexec_help
+            exit 1
+        fi
+        #积分points_data单独处理
+        if [ $wltjf -eq 1 ]; then
+            SCHEMA_NAME='points_data'
+            SQL_TYPE=`echo $L_SQL_SCRIPTS | awk -F '_' '{print $5}'`
+            DML_ROWS=`echo $L_SQL_SCRIPTS | awk -F '_' '{print $6}'`
+        else
+            SCHEMA_NAME=`echo $L_SQL_SCRIPTS | awk -F '_' '{print $3}'`
+            #schema是否为DATA/ADM用户
+            if ! [[ $SCHEMA_NAME = *data || $SCHEMA_NAME = *adm ]]; then
+                print 1 "Warning: The schema must be xxxDATA or xxxADM."
+                sqlexec_help
+                exit 1
+            fi
+            SQL_TYPE=`echo $L_SQL_SCRIPTS | awk -F '_' '{print $4}'`
+            DML_ROWS=`echo $L_SQL_SCRIPTS | awk -F '_' '{print $5}'`
+        fi
+        
+    #mysql 脚本
+    elif [ $DB_TYPE = "mysql" ]; then
+        for  mysqldb in `cat $MYSQL_CFG | grep -v "^$" | grep -v "^#" | grep "#"`
+        do
+            DB_NAME=`echo $mysqldb | awk -F '#' '{print $1}' | tr '[A-Z]' '[a-z]'`
+            SCHEMA_NAME=`echo $mysqldb | awk -F '#' '{print $2}' | tr '[A-Z]' '[a-z]'`
+            is_true=`echo "$L_SQL_SCRIPTS" | grep "${SCHEMA_NAME}_${SCHEMA_NAME}" | wc -l`
+            if [ $is_true -eq 0 ]; then
+                continue
+            else
+               SQL_TYPE=`echo $L_SQL_SCRIPTS | awk -F "$SCHEMA_NAME" '{print $3}' | awk -F '_' '{print $2}'`
+               DML_ROWS=`echo $L_SQL_SCRIPTS | awk -F "$SCHEMA_NAME" '{print $3}' | awk -F '_' '{print $3}'`
+               break
+            fi
+        
+        done
+    else
+        print 2 "Warning: 请输入正确的DB类型，目前支持Oracle和MySQL数据库!"
+        sqlexec_help
+    fi
+
+
+    
+	
+    #执行sql脚本相关参数
+    IGNORE_ROWS=`echo $2 | tr '[A-Z]' '[a-z]'`
+    EXEC_TIME=`date +'%Y%m%d%H%M%S'`
+    TNSNAME=${TNSNAME}${DB_NAME}
+    PASSWORD=`echo $PASSWORD | /usr/bin/base64 -d`
+	
+    #spool log参数
+    SQL_DIR=`/usr/bin/dirname ${SQL_SCRIPTS}`
+    SQL_NAME=`/bin/basename ${SQL_SCRIPTS}`
+    if [ ! -d "$SQL_DIR/log" ]; then
+        mkdir -p $SQL_DIR/log
+    fi
+    SPOOLDIR="$SQL_DIR/log"
+    SPOOLLOG="${SPOOLDIR}/${SQL_NAME}_${EXEC_TIME}_spool.log"
+    LOGFILE="${SPOOLDIR}/${SQL_NAME}_${EXEC_TIME}_sqlexec.log"
+    EXEC_ROWS_LOG="${SPOOLDIR}/${SQL_NAME}_${EXEC_TIME}_exec_rows.log"
+    DML_ROWS_LOG="${SPOOLDIR}/${SQL_NAME}_${EXEC_TIME}_dml_rows.log"
+    DIFF_ROWS_LOG="${SPOOLDIR}/${SQL_NAME}_${EXEC_TIME}_diff_rows.log"
+    ROWS_ERROR_LOG="${SPOOLDIR}/${SQL_NAME}_${EXEC_TIME}_rows_error.log"
+    TCL_SQL="${SPOOLDIR}/${SQL_NAME}_${EXEC_TIME}_tcl.sql"
+
+
+    #rm $EXEC_ROWS_LOG $DML_ROWS_LOG $DIFF_ROWS_LOG $ROWS_ERROR_LOG $TCL_SQL > /dev/null 2>&1
+    echo $DML_ROWS > $DML_ROWS_LOG
+	cat /dev/null > $ROWS_ERROR_LOG
+fi
+
+
+
+
+#SQL脚本类型是否为DDL/DML
+if ! [[ $SQL_TYPE = "ddl" || $SQL_TYPE = "dml" ]]; then
+    print 1 "Warning: the sql type must be DDL or DML."
+    sqlexec_help
+    exit 1
+else
+    if ! [ $DML_ROWS -ge 0 ] 2>/dev/null; then
+        print 1 "Warning: 请输入变更数据条数. if SQL_TYPE='DDL' 变更条数=0; if SQL_TYPE='DML' 变更条数>0."
+        sqlexec_help
+        exit 1
+    fi
+fi
+
+
+#检查SQL脚本是否有危险操作
+if [ -f $SQL_SCRIPTS ]; then
+    v_keyword=`grep -iE "\<drop\>|\<truncate\>|\<commit\>" $SQL_SCRIPTS | wc -l`
+    if [ $v_keyword -gt 0 ]; then
+        print 2 "Warning: the sql script $SQL_SCRIPTS has dangerous operation like 'drop or truncate or commit'"
+        sqlexec_help
+        exit 1
+    fi
+else
+    print 3 "Waring: please verify whether the sql script $SQL_SCRIPTS is exist."
+    sqlexec_help
+    exit 1
+fi
+
+
+#脚本类型和实际脚本匹配判断
+stmt_dml=`cat $SQL_SCRIPTS | grep -iE "\<insert\>.*\<into\>|\<delete\>.*\<from\>|\<update\>.*\<set\>|\<merge\>.*\<into\>" | wc -l `
+stmt_ddl=`cat $SQL_SCRIPTS | grep -iE "(\<create\>|\<alter\>|\<drop\>).*(\<table\>|\<index\>|\<sequence\>|\<synonym\>)" | wc -l `
+if [[ $SQL_TYPE = "ddl" && $stmt_dml -gt 0 || $SQL_TYPE = "dml" && $stmt_ddl -gt 0 ]]; then
+    print 2 "Warning: SQL类型和实际的SQL脚本不匹配"
+    sqlexec_help
+    exit 1
+fi
+
+
+
+
+#判断DB类型，目前支持Oracle,MySQL
+if [ $DB_TYPE = "oracle" ]; then 
+    sqlexec_oracle | tee -a $LOGFILE
+elif [ $DB_TYPE = "mysql" ]; then
+    sqlexec_mysql | tee -a $LOGFILE
+else
+    print 2 "Warning: 请输入正确的DB类型，目前支持Oracle和MySQL数据库!"
+	sqlexec_help
+fi
