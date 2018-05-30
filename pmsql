@@ -113,7 +113,7 @@ orz)
 ;;
 dbs)
   $MYSQL_CMD_V <<EOF
-  "show databases"
+  show databases;
 EOF
 ;;
 locku)
